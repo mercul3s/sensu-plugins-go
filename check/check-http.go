@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"io/ioutil"
 	"net/http"
 	"strconv"
 	"time"
@@ -10,20 +12,31 @@ import (
 
 func main() {
 	var (
-		url      string
-		redirect bool
-		timeout  int
+		url          string
+		redirect     bool
+		timeout      int
+		minBytes     int
+		requireBytes int
 	)
 
 	c := check.New("CheckHTTP")
 	c.Option.StringVarP(&url, "url", "u", "http://localhost/", "URL")
 	c.Option.BoolVarP(&redirect, "redirect", "r", false, "REDIRECT")
 	c.Option.IntVarP(&timeout, "timeout", "t", 15, "TIMEOUT")
+	c.Option.IntVarP(&minBytes, "min-bytes", "g", -1, "MIN RESPONSE BYTES")
+	c.Option.IntVarP(&requireBytes, "require-bytes", "B", -1, "REQUIRED RESPONSE BYTES")
 	c.Init()
 
-	status, err := statusCode(url, timeout)
+	status, bytesRead, err := statusCode(url, timeout, redirect)
 	if err != nil {
 		c.Error(err)
+	}
+
+	switch {
+	case bytesRead < minBytes && minBytes > -1:
+		c.Critical(fmt.Sprintf("Response was %d bytes instead of minimum of %d bytes", bytesRead, minBytes))
+	case bytesRead != requireBytes && requireBytes > -1:
+		c.Critical(fmt.Sprintf("Response was %d bytes instead of required %d bytes", bytesRead, requireBytes))
 	}
 
 	switch {
@@ -38,18 +51,29 @@ func main() {
 	}
 }
 
-func statusCode(url string, timeout int) (int, error) {
-	http.DefaultClient.Timeout = time.Duration(timeout) * time.Second
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	return http.ErrUseLastResponse
+}
 
-	request, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return 0, err
+func statusCode(url string, timeout int, redirect bool) (int, int, error) {
+	client := http.Client{
+		Timeout: time.Duration(timeout) * time.Second,
 	}
 
-	response, err := http.DefaultTransport.RoundTrip(request)
-	if err != nil {
-		return 0, err
+	// ensure client does not follow redirects if redirect flag is set
+	if redirect {
+		client.CheckRedirect = checkRedirect
 	}
 
-	return response.StatusCode, nil
+	response, err := client.Get(url)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	body, err := ioutil.ReadAll(response.Body)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return response.StatusCode, len(body), nil
 }
